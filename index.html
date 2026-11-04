@@ -102,6 +102,16 @@
   .qrcard { background: #fff; border-radius: 16px; padding: 16px; width: min(92vw, 380px); max-height: 94vh; overflow: auto; text-align: center; }
   .qrcard img { width: 100%; height: auto; display: block; border-radius: 8px; }
   .qrhint { font-size: 13px; color: var(--muted); line-height: 1.5; margin: 8px 2px 0; }
+  .repcard { text-align: left; }
+  .repcard h3 { margin: 2px 0 2px; font-size: 18px; }
+  .ropt { display: flex; align-items: center; gap: 10px; padding: 11px 12px; margin-top: 8px; border: 1px solid var(--line); border-radius: 10px; font-size: 15px; cursor: pointer; }
+  .ropt input { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+  .ropt.on { border-color: var(--accent); background: #effaf3; font-weight: 600; }
+  #repEtc { display: none; width: 100%; box-sizing: border-box; margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: 15px; resize: vertical; }
+  .replabel { display: block; margin-top: 14px; font-size: 14px; font-weight: 600; }
+  .replabel span { font-weight: 400; color: var(--muted); font-size: 12px; }
+  #repActual { width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; font-size: 15px; }
+  .rchip { display: inline-block; margin: 8px 6px 0 0; padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line); background: #f7f7f9; font-size: 13px; cursor: pointer; }
   .btn.mvdone { background: #f2f2f7; border-color: #f2f2f7; color: var(--muted); }
   .cpy { font: inherit; font-size: 11px; line-height: 1.5; padding: 0 7px; margin-left: 4px; border-radius: 6px; border: 1px solid var(--line);
     background: #fff; color: var(--muted); vertical-align: 1px; cursor: pointer; }
@@ -145,6 +155,18 @@
 <div id="toast"></div>
 <div id="upd"></div>
 <div id="undo"></div>
+<div id="repBox" class="qrbox" onclick="if (event.target === this) closeReport()">
+  <div class="qrcard repcard">
+    <h3>이름·위치가 틀렸어요</h3>
+    <div class="sub" id="repName"></div>
+    <div id="repOpts"></div>
+    <textarea id="repEtc" rows="2" placeholder="기타 내용을 적어 주세요"></textarea>
+    <label class="replabel" for="repActual">네이버에 있는 실제 매장명 <span>(알면 적어 주세요)</span></label>
+    <input id="repActual" type="text" placeholder="예: 스타벅스 연희동점" autocomplete="off">
+    <div id="repChips"></div>
+    <div class="btns"><button class="btn primary" id="repSend" onclick="sendReport()">보내기</button><button class="btn" onclick="closeReport()">닫기</button></div>
+  </div>
+</div>
 <div id="qrBox" class="qrbox" onclick="if (event.target === this) closeQR()">
   <div class="qrcard">
     <img id="qrImg" alt="카카오페이 QR">
@@ -1899,7 +1921,7 @@ function openSheet(s, fromList, fromHist) {
   $("sheetBody").innerHTML = `
     ${sheetFromList ? `<button class="back" onclick="openSpot()">← 이 자리 매장 목록 (${spotList.entries.length}곳)</button>` : ""}
     ${sheetFromHist ? `<button class="back" onclick="openMyVisits()">← 내 방문 기록</button>` : ""}
-    <h2>${esc(name)}</h2>
+    <h2>${esc(name)} <button class="cpy" onclick="copyName('${s.i}')">복사</button></h2>
     <span class="badge" style="background:${STATUS[st(s)].color}">${STATUS[st(s)].label}</span>
     ${s.src === "k" ? `<span class="badge kbadge">카카오페이 SQR</span>` : ""}
     ${isGuess(s) ? `<span class="badge" style="background:#8e8e93">한글 추정</span>` : ""}
@@ -2019,21 +2041,48 @@ function toggleVisited(id) {
 }
 
 /* ---------- 오류 제보 (구글 시트 '오류제보' 탭) → 다음 verify 때 실제 매장명으로 다시 찾고 번역도 배움 ---------- */
-async function reportError(id) {
+// 오류 제보: 고르기만 하면 되는 창 (아무것도 안 고르면 '주소는 맞아요'), 기타는 직접 적기, 실제 매장명은 알면 적기
+const REPORT_OPTS = ["주소는 맞아요 (이름만 달라요)", "핀 위치가 달라요", "폐업·이전했어요", "기타 (직접 적기)"];
+let repId = null;
+function reportError(id) {
   const s = byId.get(id);
   if (!s || !TEAM_SYNC_URL) return;
-  const actual = prompt(`'${nameOf(s)}'\n\n네이버 지도에 있는 실제 매장명을 적어 주세요.\n(모르면 비워 두고 확인을 눌러도 돼요)`, "");
-  if (actual === null) return;
-  const memo = prompt("메모 (예: 주소는 맞아요 / 폐업했어요 / 위치가 달라요)", "");
-  if (memo === null) return;
-  if (!actual.trim() && !memo.trim()) return alert("실제 매장명이나 메모를 적어 주세요.");
+  repId = id;
+  $("repName").textContent = nameOf(s) + (nameOf(s) !== s.n ? ` (${s.src === "k" ? "카카오페이" : "PMS"} 이름: ${s.n})` : "");
+  $("repOpts").innerHTML = REPORT_OPTS.map((o, k) =>
+    `<label class="ropt${k === 0 ? " on" : ""}"><input type="radio" name="repOpt" value="${k}"${k === 0 ? " checked" : ""}> ${esc(o)}</label>`).join("");
+  $("repOpts").querySelectorAll("input").forEach((r) => (r.onchange = () => {
+    $("repOpts").querySelectorAll(".ropt").forEach((l) => l.classList.toggle("on", l.querySelector("input").checked));
+    $("repEtc").style.display = r.value === "3" ? "block" : "none";
+    if (r.value === "3") $("repEtc").focus();
+  }));
+  $("repEtc").value = ""; $("repEtc").style.display = "none";
+  $("repActual").value = "";
+  // 네이버 후보가 있으면 눌러서 바로 채우기
+  const cands = [...new Set([s.s !== "ok" ? s.k : "", s.kg].filter((x) => x && x !== s.n))];
+  $("repChips").innerHTML = cands.map((c) => `<span class="rchip" data-v="${esc(c)}">${esc(c)} ← 이 이름이에요</span>`).join("");
+  $("repChips").querySelectorAll(".rchip").forEach((c) => (c.onclick = () => { $("repActual").value = c.dataset.v; }));
+  $("repSend").disabled = false;
+  $("repBox").style.display = "flex";
+}
+function closeReport() { $("repBox").style.display = "none"; repId = null; }
+async function sendReport() {
+  const s = byId.get(repId);
+  if (!s) return closeReport();
+  const k = +(($("repOpts").querySelector("input:checked") || {}).value || 0);
+  const etc = $("repEtc").value.trim();
+  if (k === 3 && !etc) { $("repEtc").focus(); return alert("기타 내용을 적어 주세요."); }
+  const memo = k === 3 ? "기타: " + etc : REPORT_OPTS[k];
+  const actual = $("repActual").value.trim();
+  $("repSend").disabled = true;
   try {
     const r = await (await fetch(TEAM_SYNC_URL, { method: "POST", body: JSON.stringify({ op: "report", code: session.code, user: session.name || "",
-      report: { pms: s.n, shown: nameOf(s) !== s.n ? nameOf(s) : "", actual: actual.trim(), memo: memo.trim(), id: s.i } }) })).json();
-    if (r.error === "code") return alert("팀 코드가 바뀌었어요. 메뉴에서 팀 코드를 다시 입력해 주세요.");
+      report: { pms: s.n, shown: nameOf(s) !== s.n ? nameOf(s) : "", actual, memo, id: s.i } }) })).json();
+    if (r.error === "code") { $("repSend").disabled = false; return alert("팀 코드가 바뀌었어요. 메뉴에서 팀 코드를 다시 입력해 주세요."); }
     if (!r.ok) throw new Error(r.error || "fail");
+    closeReport();
     toast("오류 제보를 보냈어요. 다음 네이버 확인 때 반영돼요.");
-  } catch (e) { alert("보내지 못했어요. 인터넷 연결을 확인하고 다시 해 주세요."); }
+  } catch (e) { $("repSend").disabled = false; alert("보내지 못했어요. 인터넷 연결을 확인하고 다시 해 주세요."); }
 }
 
 /* ---------- 검색 ---------- */
@@ -2137,6 +2186,13 @@ function copyForDing(id) {
   if (!s) return;
   copyText(s.n);
   toast(`'${s.n}' 복사했어요 → 매장 목록 검색창에 붙여넣기`);
+}
+// 매장명(네이버에서 확인된 실제 이름, 없으면 지도에 보이는 이름) 복사
+function copyName(id) {
+  const s = byId.get(id);
+  if (!s) return;
+  copyText(nameOf(s));
+  toast("매장명을 복사했어요: " + nameOf(s));
 }
 
 function toast(t) {
@@ -2603,7 +2659,7 @@ window.addEventListener("resize", () => {
 /* ---------- 새 버전 자동 적용 ----------
    휴대폰은 페이지를 잠깐(GitHub는 최대 10분) 저장해 두고 그걸 보여 줘서, index.html 을 바꿔도 새로고침만으로는 안 바뀔 때가 있어요.
    열 때·다시 볼 때마다 서버의 index.html 버전을 확인해서, 다르면 새 버전으로 다시 열어요. (index.html 을 고칠 때마다 아래 버전도 바꿈) */
-const APP_VERSION = "2026-10-31.1";
+const APP_VERSION = "2026-11-04.1";
 let updLast = 0, publishing = false;
 const appBase = () => location.pathname.replace(/[^/]*$/, "");
 async function checkUpdate(atStart) {
