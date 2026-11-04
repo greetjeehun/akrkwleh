@@ -1235,7 +1235,7 @@ async function init() {
   buildChips();
   naver.maps.Event.addListener(map, "idle", scheduleRender);
   naver.maps.Event.addListener(map, "click", () => { closeSheet(); $("results").style.display = "none"; });
-  naver.maps.Event.addListener(map, "init", () => { DIAG.initFired = true; if (prefs.area) fitArea(); render(); });
+  naver.maps.Event.addListener(map, "init", () => { DIAG.initFired = true; if (prefs.area && locMode === "off") fitArea(); render(); });
   $("q").addEventListener("input", onSearch);
   $("locBtn").onclick = onLocBtn;
   $("northBtn").onclick = onNorthBtn;
@@ -1245,6 +1245,7 @@ async function init() {
   positionOverlays();
   if (prefs.area) fitArea();
   render();
+  autoLocate();
   setTimeout(checkTiles, 7000);
   if (TEAM_SYNC_URL) startTeamSync();
 }
@@ -1757,6 +1758,8 @@ function render() {
   const groups = new Map();
   let tooMany = false;
   if (focusS) { shown.unshift(focusS); }      // 맨 먼저 묶어서 핀이 너무 많아도 이 핀은 그림
+  // '이 화면 N개'는 아직 안 간 매장만 셈 ('방문한 매장 보기'로 흐리게 보이는 핀·고른 매장이라 잠깐 보이는 핀은 빼고)
+  const todoN = shown.filter((s) => !isDone(s) && (s !== focusS || visibleFilter(s))).length;
   for (const s of shown) {
     const p = s._p, k = spotKey(p);
     let g = groups.get(k);
@@ -1771,7 +1774,7 @@ function render() {
   const mode = (zoom >= LABEL_ZOOM && groups.size <= 120) ? "label" : (zoom >= 15 && groups.size <= PIN_MAX) ? "pin" : "dot";
   lastMode = mode;
 
-  if (tooMany) setHint(`이 화면에 매장 ${shown.length.toLocaleString()}개 — 확대하면 핀이 보여요`);
+  if (tooMany) setHint(`이 화면에 매장 ${todoN.toLocaleString()}개 — 확대하면 핀이 보여요`);
   else if (!shown.length && otherArea && prefs.area)
     setHint(`이 화면에는 '${esc(prefs.area)}' 매장이 없어요 (다른 상권 매장 ${otherArea.toLocaleString()}개)`, "전체 상권 보기", () => {
       prefs.area = ""; $("area").value = ""; lsSet(LS_PREF, prefs); buildChips(); render();
@@ -1802,7 +1805,7 @@ function render() {
   }
   const { total, done } = scopeCounts();
   $("stat").textContent = `${prefs.area || "전체"} · 남은 매장 ${(total - done).toLocaleString()} · 방문 ${done.toLocaleString()}` +
-    ` · 이 화면 ${shown.length.toLocaleString()}개` + syncLabel();
+    ` · 이 화면 ${todoN.toLocaleString()}개` + syncLabel();
 }
 
 // 핀 색: 매장 하나면 상태 색, 여러 개면 상태별 비율 원그래프
@@ -2211,6 +2214,12 @@ async function onLocBtn() {
     setLocMode("follow");
     if (myPos) { centerOnMe(); map.setZoom(Math.max(map.getZoom(), 17)); }
   } else if (locMode === "follow") {
+    if (!startCompass.started) {   // 지도를 켤 때 자동으로 따라가기를 시작함: 방향 권한은 버튼을 누른 지금 물어봐요
+      const ask = compassNeedsAsk();
+      await startCompass();
+      if (compassDenied) return;   // 허용 안 하면 따라가기는 그대로
+      if (ask) return setLocMode("face");   // 방금 허용 → 방향 값은 곧 들어와요
+    }
     if (heading == null) {         // 나침반이 없는 기기(PC 등): 예전처럼 끄기
       setLocMode("off");
       return toast(compassDenied ? "방향(나침반) 권한이 없어서 지도를 돌릴 수 없어요. 따라가기를 껐어요."
@@ -2223,7 +2232,19 @@ async function onLocBtn() {
   }
 }
 
-function setLocMode(mode) {
+// 휴대폰에서 지도를 켜면 ◎ 버튼을 누른 것처럼 내 위치를 따라가며 시작 (위치를 못 받으면 원래 화면 그대로, 안내 없이)
+async function autoLocate() {
+  if (!IS_MOBILE || !navigator.geolocation) return;
+  try {   // 위치 권한을 '차단'해 둔 사람에게는 켤 때마다 묻지 않음 (◎ 버튼은 그대로 쓸 수 있음)
+    if (navigator.permissions && (await navigator.permissions.query({ name: "geolocation" })).state === "denied") return;
+  } catch (e) { /* 권한 조회를 지원하지 않는 브라우저 */ }
+  if (locMode !== "off" || focusId || current) return;      // 그 사이 매장을 골랐으면 그대로
+  listenCompass();     // 권한 없이 방향이 들어오는 폰은 바로 부채꼴 표시 (권한이 필요한 폰은 ◎ 를 누를 때 물어봐요)
+  startWatch(true);
+  setLocMode("follow", true);
+}
+
+function setLocMode(mode, quiet) {
   const prev = locMode;
   locMode = mode;
   const b = $("locBtn");
@@ -2231,7 +2252,7 @@ function setLocMode(mode) {
   b.classList.toggle("face", mode === "face");
   $("locIcon").innerHTML = mode === "face" ? ARROW_SVG : "◎";
   b.title = mode === "follow" ? "내 위치 따라가는 중 — 누르면 방향 모드" : mode === "face" ? "방향 모드 — 누르면 북쪽이 위로" : "내 위치";
-  if (mode === "follow" && prev === "off" && !compassDenied)
+  if (mode === "follow" && prev === "off" && !compassDenied && !quiet)
     toast(compassOn || heading != null || navigator.maxTouchPoints > 0
       ? "내 위치를 따라가요. 한 번 더 누르면 바라보는 방향이 위로 오게 지도가 돌아가요." : "내 위치를 따라가요.");
   if (mode === "face") {
@@ -2243,7 +2264,7 @@ function setLocMode(mode) {
   if (mode !== "off" && myPos) centerOnMe();
 }
 
-function startWatch() {
+function startWatch(quiet) {      // quiet: 지도를 켤 때 자동으로 찾는 중 → 첫 위치를 못 받으면 안내 없이 원래 화면
   if (watchId != null) return;
   watchId = navigator.geolocation.watchPosition((p) => {
     const first = !myPos;
@@ -2253,7 +2274,7 @@ function startWatch() {
     updateMe();
     if (locMode !== "off") { centerOnMe(); if (first) map.setZoom(Math.max(map.getZoom(), 17)); }
   }, (err) => {
-    toast(err.code === 1 ? "위치 권한을 허용해 주세요. (브라우저 설정 › 사이트 권한 › 위치)" : "현재 위치를 찾지 못했어요.");
+    if (!quiet || myPos) toast(err.code === 1 ? "위치 권한을 허용해 주세요. (브라우저 설정 › 사이트 권한 › 위치)" : "현재 위치를 찾지 못했어요.");
     if (!myPos) { setLocMode("off"); navigator.geolocation.clearWatch(watchId); watchId = null; }
   }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
 }
@@ -2269,13 +2290,19 @@ function compassHandler(e) {
   applyHeading((h + scr + 360) % 360);
 }
 
+const compassNeedsAsk = () => typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function";
+function listenCompass() {         // 방향 이벤트만 연결 (권한은 묻지 않음 — 버튼을 누르지 않은 때에도 됨)
+  if (listenCompass.on) return;
+  listenCompass.on = true;
+  window.addEventListener("deviceorientationabsolute", compassHandler);   // 안드로이드 크롬
+  window.addEventListener("deviceorientation", compassHandler);           // 아이폰
+}
 async function startCompass() {
   if (startCompass.started) return;
   startCompass.started = true;
-  window.addEventListener("deviceorientationabsolute", compassHandler);   // 안드로이드 크롬
-  window.addEventListener("deviceorientation", compassHandler);           // 아이폰
+  listenCompass();
   try {
-    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function") {
+    if (compassNeedsAsk()) {
       const r = await DeviceOrientationEvent.requestPermission();   // 아이폰은 버튼을 누를 때 한 번 물어봐요
       if (r !== "granted") { compassDenied = true; toast("방향(나침반) 권한을 허용하지 않아서 바라보는 방향은 표시할 수 없어요."); }
     }
@@ -2659,7 +2686,7 @@ window.addEventListener("resize", () => {
 /* ---------- 새 버전 자동 적용 ----------
    휴대폰은 페이지를 잠깐(GitHub는 최대 10분) 저장해 두고 그걸 보여 줘서, index.html 을 바꿔도 새로고침만으로는 안 바뀔 때가 있어요.
    열 때·다시 볼 때마다 서버의 index.html 버전을 확인해서, 다르면 새 버전으로 다시 열어요. (index.html 을 고칠 때마다 아래 버전도 바꿈) */
-const APP_VERSION = "2026-11-04.1";
+const APP_VERSION = "2026-11-04.2";
 let updLast = 0, publishing = false;
 const appBase = () => location.pathname.replace(/[^/]*$/, "");
 async function checkUpdate(atStart) {
