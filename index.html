@@ -1240,6 +1240,7 @@ async function init() {
   $("locBtn").onclick = onLocBtn;
   $("northBtn").onclick = onNorthBtn;
   initGestures();
+  initBackButton();
   applyTransform();
   $("menuBtn").onclick = openMenu;
   positionOverlays();
@@ -2198,6 +2199,63 @@ function copyName(id) {
   toast("매장명을 복사했어요: " + nameOf(s));
 }
 
+/* ---------- 휴대폰 '뒤로 가기' 버튼: 열린 창부터 하나씩 닫기 ----------
+   갤럭시 뒤로 가기(아이폰은 왼쪽 끝에서 밀기)를 누르면 브라우저가 이전 페이지로 가서 지도가 꺼지는 대신,
+   결제 QR·오류 제보·메뉴·검색 결과·매장 창을 위에서부터 하나씩 닫아요. (목록에서 연 매장 창은 목록으로 돌아감)
+   휴대폰에서 열린 창이 없으면 '한 번 더 누르면 나가요' 안내 → 한 번 더 누르면 나가요.
+   방법: 열린 창 수(+1)만큼 브라우저 기록을 쌓아 두고, 뒤로 가기로 기록이 하나 빠지면(popstate) 맨 위 창을 닫음.
+   기록은 손을 댄 직후에만 쌓아요 (손대지 않고 쌓은 기록은 크롬·삼성 인터넷이 뒤로 가기에서 건너뛰어요). */
+let backDepth = 0, backIgnore = 0, exitPending = false, backQueued = false;
+const isShown = (id) => getComputedStyle($(id)).display !== "none";
+function backLayers() {
+  let n = 0;
+  if ($("sheet").classList.contains("open")) n += current && (sheetFromList || sheetFromHist) ? 2 : 1;
+  if ($("menu").classList.contains("open")) n++;
+  if (isShown("qrBox") || isShown("repBox")) n++;
+  if (isShown("results")) n++;
+  return n;
+}
+function closeTop() {
+  if (isShown("qrBox")) { closeQR(); return true; }
+  if (isShown("repBox")) { closeReport(); return true; }
+  if ($("menu").classList.contains("open")) { closeMenu(); return true; }
+  if (isShown("results")) { $("results").style.display = "none"; $("q").blur(); return true; }
+  if ($("sheet").classList.contains("open")) {
+    if (current && sheetFromList && spotList) openSpot();          // 목록에서 연 매장 → 목록으로
+    else if (current && sheetFromHist) openMyVisits();             // 내 방문 기록에서 연 매장 → 기록으로
+    else closeSheet();
+    return true;
+  }
+  return false;
+}
+function syncBack() {
+  backQueued = false;
+  if (!map) return;
+  const want = backLayers() + (IS_MOBILE && !exitPending ? 1 : 0);
+  if (want > backDepth) {
+    if (navigator.userActivation && !navigator.userActivation.isActive) return;   // 손을 댄 직후에만
+    try { while (backDepth < want) { history.pushState({ storemap: backDepth + 1 }, ""); backDepth++; } } catch (e) {}
+  } else if (want < backDepth) {          // × 나 지도 빈 곳을 눌러 닫았으면 쌓아 둔 기록도 빼기
+    backIgnore++;
+    history.go(want - backDepth);
+    backDepth = want;
+  }
+}
+function queueBack() { if (!backQueued) { backQueued = true; queueMicrotask(syncBack); } }
+function initBackButton() {
+  const mo = new MutationObserver(queueBack);
+  for (const id of ["sheet", "menu", "qrBox", "repBox", "results"]) mo.observe($(id), { attributes: true, attributeFilter: ["class", "style"] });
+  mo.observe($("sheetBody"), { childList: true });
+  for (const t of ["pointerup", "touchend", "click", "keydown"])
+    window.addEventListener(t, () => { exitPending = false; queueBack(); }, true);
+  window.addEventListener("popstate", () => {
+    if (backIgnore > 0) { backIgnore--; return; }      // 위에서 기록을 뺄 때 생긴 것
+    if (backDepth > 0) backDepth--;
+    if (closeTop()) return;
+    if (IS_MOBILE) { exitPending = true; toast("뒤로 가기를 한 번 더 누르면 지도에서 나가요"); }
+  });
+}
+
 function toast(t) {
   const el = $("toast");
   el.textContent = t;
@@ -2686,7 +2744,7 @@ window.addEventListener("resize", () => {
 /* ---------- 새 버전 자동 적용 ----------
    휴대폰은 페이지를 잠깐(GitHub는 최대 10분) 저장해 두고 그걸 보여 줘서, index.html 을 바꿔도 새로고침만으로는 안 바뀔 때가 있어요.
    열 때·다시 볼 때마다 서버의 index.html 버전을 확인해서, 다르면 새 버전으로 다시 열어요. (index.html 을 고칠 때마다 아래 버전도 바꿈) */
-const APP_VERSION = "2026-11-04.2";
+const APP_VERSION = "2026-11-06.1";
 let updLast = 0, publishing = false;
 const appBase = () => location.pathname.replace(/[^/]*$/, "");
 async function checkUpdate(atStart) {
@@ -2707,7 +2765,16 @@ async function checkUpdate(atStart) {
   if (tried === latest || busy) return showUpdate(latest);   // 이미 한 번 다시 열었거나 뭔가 하는 중이면 버튼으로 안내만
   reloadTo(latest);
 }
-function reloadTo(v) { location.replace(appBase() + "?v=" + encodeURIComponent(v)); }   // 주소가 달라서 저장된 옛 페이지를 안 씀
+function reloadTo(v) {   // 주소가 달라서 저장된 옛 페이지를 안 씀
+  const go = () => location.replace(appBase() + "?v=" + encodeURIComponent(v));
+  if (!backDepth) return go();
+  // '뒤로 가기'용으로 쌓아 둔 기록을 먼저 빼고 새 버전으로 (뒤로 가기에 옛 지도가 남지 않게)
+  backIgnore++;
+  window.addEventListener("popstate", go, { once: true });
+  setTimeout(go, 1500);
+  history.go(-backDepth);
+  backDepth = 0;
+}
 function showUpdate(v) {
   const el = $("upd");
   el.innerHTML = "새 버전이 있어요 <button>업데이트</button>";
