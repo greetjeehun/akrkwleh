@@ -1186,7 +1186,7 @@ const posLabel = (s) => posInfo(s).src;
 const DIAG = { authFailed: false, initFired: false, errors: [] };
 window.addEventListener("error", (e) => DIAG.errors.push(String(e.message || e.type)));
 window.addEventListener("unhandledrejection", (e) => DIAG.errors.push("Promise: " + String(e.reason)));
-function showBanner(html) { $("bannerText").innerHTML = html; $("banner").style.display = "block"; }
+function showBanner(html) { $("bannerText").innerHTML = html; $("banner").dataset.kind = ""; $("banner").style.display = "block"; }
 
 function showMsg(html) { $("msg").innerHTML = html; $("msg").style.display = "flex"; }
 
@@ -1518,7 +1518,7 @@ async function publishTeamUpdate() {
     // 팀 지도에는 검색용 주소(ad)는 필요 없어서 빼고 잠가요 (파일이 작아져서 휴대폰에서 빨리 열려요)
     // 번호(pid)는 남겨요: S2 PMS = Store ID, 카카오페이 = QR 번호 ('카카오페이 QR 열기' 링크)
     const uniq = new Map(JSON.parse(text).map((s) => [s.i, s]));   // 같은 매장이 두 번 있으면 하나만 (지도와 똑같이)
-    const slim = JSON.stringify([...uniq.values()].map(({ ad, ...rest }) => rest));
+    const slim = JSON.stringify([...uniq.values()].map(({ ad, mu, b, ...rest }) => rest));   // 방문자 계정·담당자 이름은 팀 데이터에 안 넣음
     const bytes = await encryptStores(slim, code);
     const check = await decryptStores(bytes.buffer, code);
     if (check.length !== stores.length) throw new Error("파일 확인 실패");
@@ -1950,10 +1950,10 @@ function openSheet(s, fromList, fromHist) {
   if (s.qa && !s.ra) info.push(`한글 주소(추정): ${esc(s.qa)}`);
   if (s.cat) info.push(esc(s.cat));
   info.push(`핀 위치: ${posLabel(s)}${verified && s.d != null ? ` · ${s.src === "k" ? "주소 위치" : "PMS 좌표"}와 ${s.d.toLocaleString()}m 차이` : ""}`);
-  info.push(`${esc(s.g)}${s.b ? " · 담당 " + esc(s.b) : ""}`);
+  info.push(esc(s.g));
   if (Array.isArray(s.qs) && s.qs.length && s.s !== "ok") info.push(`네이버에서 찾아본 검색어: ${s.qs.map(esc).join(" · ")}`);
   if (isV) info.push(`<b>방문 완료</b>: ${new Date(visited[s.i].t).toLocaleString("ko-KR")}${visited[s.i].u ? " · " + esc(visited[s.i].u) : ""}`);
-  if (s.mv) info.push(`<b>MAGA 방문 완료</b>: ${esc(s.mv)}${s.mu ? " · " + esc(s.mu) : ""}`);
+  if (s.mv) info.push(`<b>MAGA 방문 완료</b>: ${esc(s.mv)}`);   // 방문자 계정(회사 정보)은 안 보여줌
   $("sheetBody").innerHTML = `
     ${sheetFromList ? `<button class="back" onclick="openSpot()">← 이 자리 매장 목록 (${spotList.entries.length}곳)</button>` : ""}
     ${sheetFromHist ? `<button class="back" onclick="openMyVisits()">← 내 방문 기록</button>` : ""}
@@ -2362,11 +2362,36 @@ function startWatch(quiet) {      // quiet: 지도를 켤 때 자동으로 찾�
     // 나침반이 없는 기기: 걸어가는 방향(GPS)으로 대신
     if (!compassOn && typeof p.coords.heading === "number" && !isNaN(p.coords.heading) && (p.coords.speed || 0) > 0.7) applyHeading(p.coords.heading);
     updateMe();
+    if ($("banner").dataset.kind === "loc") $("banner").style.display = "none";   // 설정을 고쳐서 위치가 들어오면 안내 닫기
     if (locMode !== "off") { centerOnMe(); if (first) map.setZoom(Math.max(map.getZoom(), 17)); }
   }, (err) => {
-    if (!quiet || myPos) toast(err.code === 1 ? "위치 권한을 허용해 주세요. (브라우저 설정 › 사이트 권한 › 위치)" : "현재 위치를 찾지 못했어요.");
+    if (!quiet || myPos) { if (err.code === 1) locHelp(); else toast("현재 위치를 찾지 못했어요. 잠시 뒤 다시 눌러 보세요."); }
     if (!myPos) { setLocMode("off"); navigator.geolocation.clearWatch(watchId); watchId = null; }
   }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 });
+}
+
+// 위치 권한이 막혀 있을 때: 휴대폰·브라우저마다 어디서 켜는지 알려 줌 (× 를 누를 때까지 보임)
+// 아이폰은 '위치 서비스'(전체) · 'Safari 웹 사이트'(앱) · Safari 의 사이트별 설정, 세 군데가 다 허용이어야 해요.
+function locHelp() {
+  const ua = navigator.userAgent;
+  const ios = /iPhone|iPad|iPod/.test(ua) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));
+  const app = /KAKAOTALK/i.test(ua) ? "카카오톡" : /NAVER\(inapp/i.test(ua) ? "네이버" : /SamsungBrowser/.test(ua) ? "삼성 인터넷"
+    : /Whale/i.test(ua) ? "웨일" : /CriOS/.test(ua) ? "Chrome" : /FxiOS/.test(ua) ? "Firefox" : /EdgiOS/.test(ua) ? "Edge"
+    : !ios && /Chrome\//.test(ua) ? "Chrome" : "";
+  const msg = ios
+    ? "<b>위치를 못 받았어요 — 아이폰 설정을 확인해 주세요</b><br>" +
+      "① 설정 › 개인정보 보호 및 보안 › <b>위치 서비스</b> 켬<br>" +
+      (app ? `② 같은 화면 아래 목록에서 <b>${app}</b> › <b>앱을 사용하는 동안</b><br>`
+           : "② 같은 화면 아래 목록에서 <b>Safari 웹 사이트</b> › <b>앱을 사용하는 동안</b><br>" +
+             "③ Safari 주소창 왼쪽 버튼(가가) › <b>웹 사이트 설정</b> › 위치 › <b>허용</b><br>") +
+      "바꾼 뒤 지도를 새로고침하고 ◎ 를 누르세요."
+    : "<b>위치를 못 받았어요 — 권한을 확인해 주세요</b><br>" +
+      "① 화면 위에서 내리는 빠른 설정에서 <b>위치</b> 켬<br>" +
+      "② 브라우저 메뉴 › 설정 › 사이트 권한(사이트 설정) › <b>위치</b> › 이 사이트 <b>허용</b><br>" +
+      "③ 휴대폰 설정 › 애플리케이션 › " + (app || "이 브라우저") + " › 권한 › <b>위치</b> › 앱 사용 중에만 허용<br>" +
+      "바꾼 뒤 지도를 새로고침하고 ◎ 를 누르세요.";
+  showBanner(msg);
+  $("banner").dataset.kind = "loc";
 }
 
 let compassDenied = false;
@@ -2776,7 +2801,7 @@ window.addEventListener("resize", () => {
 /* ---------- 새 버전 자동 적용 ----------
    휴대폰은 페이지를 잠깐(GitHub는 최대 10분) 저장해 두고 그걸 보여 줘서, index.html 을 바꿔도 새로고침만으로는 안 바뀔 때가 있어요.
    열 때·다시 볼 때마다 서버의 index.html 버전을 확인해서, 다르면 새 버전으로 다시 열어요. (index.html 을 고칠 때마다 아래 버전도 바꿈) */
-const APP_VERSION = "2026-11-06.2";
+const APP_VERSION = "2026-11-09.1";
 let updLast = 0, publishing = false;
 const appBase = () => location.pathname.replace(/[^/]*$/, "");
 async function checkUpdate(atStart) {
