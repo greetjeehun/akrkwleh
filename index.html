@@ -83,6 +83,8 @@
   .spotRow.v { opacity: .5; }
   .back { border: 0; background: none; color: #1a73e8; font: inherit; font-size: 14px; padding: 0 0 6px; cursor: pointer; }
   .lbl { position: absolute; left: 22px; top: -1px; font-size: 11px; white-space: nowrap; background: rgba(255,255,255,.9); padding: 1px 4px; border-radius: 4px; color: #111; pointer-events: none; }
+  .clust { border-radius: 50%; border: 2px solid #fff; box-shadow: 0 1px 6px rgba(0,0,0,.35); color: #fff; font-weight: 800;
+    display: flex; align-items: center; justify-content: center; letter-spacing: -.3px; cursor: pointer; }
   .sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 20; background: #fff; border-radius: 16px 16px 0 0;
     box-shadow: 0 -4px 20px rgba(0,0,0,.18); padding: 14px 16px calc(env(safe-area-inset-bottom) + 16px); transform: translateY(110%); transition: transform .2s, visibility .2s; max-height: 70%; overflow-y: auto; visibility: hidden; }
   .sheet.open { transform: none; visibility: visible; }
@@ -1144,9 +1146,12 @@ const STATUS = {
   none: { label: "네이버에 없음",   color: "var(--none)" },
   unk:  { label: "미확인",          color: "var(--unk)" },
 };
-const MAX_PINS = 2500;         // 화면에 동시에 그릴 최대 핀 수 (넘으면 확대 안내)
+const MAX_PINS = 2500;         // 화면에 동시에 그릴 최대 핀 수 (넘으면 묶어서 숫자로)
 const PIN_MAX = 600;           // 이보다 많으면 작은 점으로 표시
 const LABEL_ZOOM = 17;         // 이 줌 이상에서 매장명 라벨 표시
+const CLUSTER_ZOOM = 15;       // 이 줌보다 많이 축소하면 지역별로 묶어 '남은 수'를 숫자 원으로
+const CLUSTER_MIN = 60;        // 화면에 이보다 많을 때만 묶음 (적으면 그냥 점으로)
+const CLUSTER_CELL = 110;      // 묶는 칸 크기(px) — 이 안에 든 매장을 한 원으로 (클수록 크게 묶임)
 const LS_KEY = "storemap.visited.v1", LS_PREF = "storemap.prefs.v1", LS_USER = "storemap.user.v1",
       LS_QUEUE = "storemap.queue.v1", LS_TEAMCACHE = "storemap.team.v1", LS_MIGRATED = "storemap.migrated.v1",
       LS_ADMIN = "storemap.admin.v1", LS_SYNCLOG = "storemap.synclog.v1";
@@ -1245,10 +1250,33 @@ async function init() {
   $("menuBtn").onclick = openMenu;
   positionOverlays();
   if (prefs.area) fitArea();
+  // 딩톡·다른 앱에 갔다 돌아올 때 아이폰이 페이지를 다시 불러와도, 보던 자리·열어 둔 매장을 그대로 되살림
+  const restored = restoreView();
   render();
-  autoLocate();
+  if (!restored) autoLocate();        // 처음 켤 때만 내 위치로 시작 (다시 불러온 거면 보던 자리 유지)
+  window.addEventListener("pagehide", saveView);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") saveView(); });
   setTimeout(checkTiles, 7000);
   if (TEAM_SYNC_URL) startTeamSync();
+}
+
+// 지금 보는 자리(중심·줌)와 열어 둔 매장을 이 탭에만 저장 → 같은 탭에서 다시 불러오면 되살림 (새 탭/앱 재시작 때는 비어 있어 내 위치로 시작)
+const SS_VIEW = "storemap.view.v1";
+function saveView() {
+  if (!map) return;
+  try {
+    const c = map.getCenter();
+    sessionStorage.setItem(SS_VIEW, JSON.stringify({ c: [latOf(c), lngOf(c)], z: map.getZoom(), sid: current ? current.i : "", t: Date.now() }));
+  } catch (e) {}
+}
+function restoreView() {
+  let v;
+  try { v = JSON.parse(sessionStorage.getItem(SS_VIEW) || "null"); } catch (e) {}
+  if (!v || !Array.isArray(v.c) || Date.now() - (v.t || 0) > 30 * 60000) return false;   // 30분 넘으면 새로 시작
+  try { map.setCenter(new naver.maps.LatLng(v.c[0], v.c[1])); map.setZoom(v.z || 15); } catch (e) {}
+  const s = v.sid && byId.get(v.sid);
+  if (s && posOf(s)) openSheet(s);    // 열어 뒀던 매장 창 다시 열기 (딩톡에서 돌아왔을 때)
+  return true;
 }
 
 /* ---------- 데이터 파일 (stores.json 또는 팀 코드로 잠근 stores.enc) ---------- */
@@ -1787,27 +1815,32 @@ function render() {
     if (!prefs.status[st(s)] || !prefs.src[srcOf(s)]) { hiddenStatus++; continue; }
     shown.push(s);
   }
-  // 같은 자리(좌표)의 매장은 핀 하나로 묶음 → 누르면 목록에서 고름
-  const groups = new Map();
-  let tooMany = false;
-  if (focusS) { shown.unshift(focusS); }      // 맨 먼저 묶어서 핀이 너무 많아도 이 핀은 그림
+  // 맨 먼저: 핀이 많아도/묶여도 고른(검색한) 매장은 보이게
+  if (focusS) { shown.unshift(focusS); }
   // '이 화면 N개'는 아직 안 간 매장만 셈 ('방문한 매장 보기'로 흐리게 보이는 핀·고른 매장이라 잠깐 보이는 핀은 빼고)
   const todoN = shown.filter((s) => !isDone(s) && (s !== focusS || visibleFilter(s))).length;
-  for (const s of shown) {
-    const p = s._p, k = spotKey(p);
-    let g = groups.get(k);
-    if (!g) {
-      if (groups.size >= MAX_PINS) { tooMany = true; break; }      // 너무 많으면 더 묶을 필요 없음 (확대 안내만)
-      groups.set(k, (g = { k, p, list: [] }));
+  const zoom = map.getZoom();
+  // 많이 축소했거나(핀이 너무 많으면) 지역별로 묶어 '남은 수'를 숫자 원으로 — 핀이 사라지지 않게
+  let willCluster = zoom < CLUSTER_ZOOM && shown.length - (focusS ? 1 : 0) > CLUSTER_MIN;
+  let groups = null, mode = "dot";
+  if (!willCluster) {
+    // 같은 자리(좌표)의 매장은 핀 하나로 묶음 → 누르면 목록에서 고름
+    groups = new Map();
+    for (const s of shown) {
+      const p = s._p, k = spotKey(p);
+      let g = groups.get(k);
+      if (!g) {
+        if (groups.size >= MAX_PINS) { willCluster = true; break; }   // 핀이 너무 많으면 묶어서 숫자로
+        groups.set(k, (g = { k, p, list: [] }));
+      }
+      g.list.push(s);
     }
-    g.list.push(s);
+    if (!willCluster) mode = (zoom >= LABEL_ZOOM && groups.size <= 120) ? "label" : (zoom >= 15 && groups.size <= PIN_MAX) ? "pin" : "dot";
   }
   if (big && Date.now() - (LOGO.checked || 0) > 1000) { LOGO.checked = Date.now(); moveLogoOut(); }   // 네이버가 로고를 다시 그렸을 때 대비
-  const zoom = map.getZoom();
-  const mode = (zoom >= LABEL_ZOOM && groups.size <= 120) ? "label" : (zoom >= 15 && groups.size <= PIN_MAX) ? "pin" : "dot";
-  lastMode = mode;
+  lastMode = willCluster ? "cluster" : mode;
 
-  if (tooMany) setHint(`이 화면에 매장 ${todoN.toLocaleString()}개 — 확대하면 핀이 보여요`);
+  if (willCluster) setHint("");
   else if (!shown.length && otherArea && prefs.area)
     setHint(`이 화면에는 '${esc(prefs.area)}' 매장이 없어요 (다른 상권 매장 ${otherArea.toLocaleString()}개)`, "전체 상권 보기", () => {
       prefs.area = ""; $("area").value = ""; lsSet(LS_PREF, prefs); buildChips(); render();
@@ -1819,26 +1852,31 @@ function render() {
   else setHint("");
 
   const fKey = focusS ? spotKey(focusS._p) : null;
-  const draw = tooMany ? (fKey && groups.has(fKey) ? [groups.get(fKey)] : []) : [...groups.values()];
+  const draw = willCluster ? buildClusters(V, shown, focusS) : [...groups.values()];
   const want = new Set(draw.map((g) => g.k));
-  if (current && posOf(current)) want.add(spotKey(posOf(current)));
+  if (!willCluster && current && posOf(current)) want.add(spotKey(posOf(current)));
   for (const [id, m] of markers) if (!want.has(id)) { m.setMap(null); markers.delete(id); }
   for (const g of draw) {
-    g.list.sort((a, b) => (isDone(a) ? 1 : 0) - (isDone(b) ? 1 : 0) || nameOf(a).localeCompare(nameOf(b), "ko"));
-    const { html, sz } = markerHtml(g.list, mode);
+    let html, sz;
+    if (g.cluster) ({ html, sz } = clusterHtml(g));
+    else {
+      g.list.sort((a, b) => (isDone(a) ? 1 : 0) - (isDone(b) ? 1 : 0) || nameOf(a).localeCompare(nameOf(b), "ko"));
+      ({ html, sz } = markerHtml(g.list, mode));
+    }
     const old = markers.get(g.k);
     if (old && old.__html === html) { old.__g = g; continue; }
     if (old) old.setMap(null);
-    const m = new naver.maps.Marker({ position: new naver.maps.LatLng(g.p[0], g.p[1]), map, zIndex: g.k === fKey ? 1000 : g.list.length > 1 ? 2 : 1,
+    const m = new naver.maps.Marker({ position: new naver.maps.LatLng(g.p[0], g.p[1]), map, zIndex: g.k === fKey ? 1000 : g.cluster ? 3 : g.list.length > 1 ? 2 : 1,
       icon: { content: html, size: new naver.maps.Size(sz, sz), anchor: new naver.maps.Point(sz / 2, sz / 2) } });
     m.__html = html;
     m.__g = g;
-    naver.maps.Event.addListener(m, "click", () => onSpotClick(m.__g));
+    naver.maps.Event.addListener(m, "click", () => (g.cluster ? onClusterClick(m.__g) : onSpotClick(m.__g)));
     markers.set(g.k, m);
   }
   const { total, done } = scopeCounts();
   $("stat").textContent = `${prefs.area || "전체"} · 남은 매장 ${(total - done).toLocaleString()} · 방문 ${done.toLocaleString()}` +
     ` · 이 화면 ${todoN.toLocaleString()}개` + syncLabel();
+  saveView();   // 보던 자리 기억 (다시 불러와도 되살리게)
 }
 
 // 핀 색: 매장 하나면 상태 색, 여러 개면 상태별 비율 원그래프
@@ -1869,6 +1907,42 @@ function markerHtml(list, mode) {
   const first = f ? list.find((s) => s.i === focusId) : list[0];
   const label = mode === "label" ? `<span class="lbl" style="left:${sz + 4}px;top:${(sz - 18) / 2}px${f ? ";font-weight:700" : ""}">${esc(nameOf(first))}${n > 1 ? ` 외 ${n - 1}곳` : ""}</span>` : "";
   return { sz, html: `<div class="mk up${fc}" style="width:${sz}px;height:${sz}px"><div class="pin${v}${grp}" style="background:${bg}">${n > 1 ? n : ""}</div>${label}</div>` };
+}
+
+/* ---------- 많이 축소했을 때: 지역별로 묶어 '남은 수'를 숫자 원으로 ---------- */
+function kfmt(n) { return n < 1000 ? "" + n : (n / 1000).toFixed(1).replace(/\.0$/, "") + "K"; }
+function buildClusters(V, shown, focusS) {
+  // 화면 픽셀 기준 격자(CLUSTER_CELL)로 묶기. 원 숫자는 '아직 안 간 매장 수'
+  const cells = new Map();
+  for (const s of shown) {
+    if (s === focusS) continue;
+    const cx = Math.round(s._p[1] * V.kx / CLUSTER_CELL), cy = Math.round(-s._my * V.ky / CLUSTER_CELL);
+    const key = "c:" + cx + "_" + cy;
+    let c = cells.get(key);
+    if (!c) cells.set(key, (c = { k: key, cluster: true, n: 0, todo: 0, sx: 0, sy: 0 }));
+    c.n++; c.sx += s._p[1]; c.sy += s._p[0];
+    if (!isDone(s)) c.todo++;
+  }
+  const out = [];
+  for (const c of cells.values()) {
+    if (!c.todo) continue;                 // 남은 매장이 없으면(모두 방문) 원을 안 그림
+    c.p = [c.sy / c.n, c.sx / c.n];        // 묶인 매장들의 가운데
+    out.push(c);
+  }
+  if (focusS) out.push({ k: spotKey(focusS._p), p: focusS._p, list: [focusS] });   // 고른 매장은 원 대신 핀으로
+  if (current && current !== focusS && posOf(current)) out.push({ k: "cur:" + spotKey(posOf(current)), p: posOf(current), list: [current] });
+  return out;
+}
+function clusterHtml(c) {
+  const r = Math.min(1, Math.log10(Math.max(c.todo, 1)) / Math.log10(16000));   // 1 ~ 16,000개를 0~1 로
+  const sz = Math.round(28 + 46 * r), fs = Math.max(12, Math.round(sz * 0.34)), a = (0.6 + 0.4 * r).toFixed(2);
+  return { sz, html: `<div class="mk up"><div class="clust" style="width:${sz}px;height:${sz}px;font-size:${fs}px;background:rgba(26,115,232,${a})">${kfmt(c.todo)}</div></div>` };
+}
+function onClusterClick(c) {
+  if (!c) return;
+  if (locMode !== "off") setLocMode("off");
+  map.setCenter(new naver.maps.LatLng(c.p[0], c.p[1]));
+  map.setZoom(Math.min(MAX_ZOOM, Math.max(map.getZoom() + 2, CLUSTER_ZOOM + 1)));   // 눌러서 더 가깝게 → 원이 나뉨
 }
 
 /* ---------- 한 자리에 매장이 여러 개일 때: 목록에서 고르기 ---------- */
@@ -1977,7 +2051,7 @@ function openSheet(s, fromList, fromHist) {
   $("sheet").scrollTop = 0;
   $("sheet").classList.add("open");
 }
-function closeSheet() { $("sheet").classList.remove("open"); current = null; spotList = null; sheetFromList = false; sheetFromHist = false; clearFocus(); }
+function closeSheet() { $("sheet").classList.remove("open"); current = null; spotList = null; sheetFromList = false; sheetFromHist = false; clearFocus(); saveView(); }
 
 // '주식회사 우동명가(본점) 강남점 2층' → '우동명가 강남점' (네이버 검색용: 회사 표시·괄호·'○○점' 뒤 설명 빼기)
 function coreName(nm) {
@@ -2801,7 +2875,7 @@ window.addEventListener("resize", () => {
 /* ---------- 새 버전 자동 적용 ----------
    휴대폰은 페이지를 잠깐(GitHub는 최대 10분) 저장해 두고 그걸 보여 줘서, index.html 을 바꿔도 새로고침만으로는 안 바뀔 때가 있어요.
    열 때·다시 볼 때마다 서버의 index.html 버전을 확인해서, 다르면 새 버전으로 다시 열어요. (index.html 을 고칠 때마다 아래 버전도 바꿈) */
-const APP_VERSION = "2026-11-09.1";
+const APP_VERSION = "2026-11-13.2";
 let updLast = 0, publishing = false;
 const appBase = () => location.pathname.replace(/[^/]*$/, "");
 async function checkUpdate(atStart) {
